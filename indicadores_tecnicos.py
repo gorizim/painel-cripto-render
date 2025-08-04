@@ -1,6 +1,7 @@
 import os
 import requests
 import numpy as np
+import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -117,6 +118,14 @@ def detectar_divergencia_obv(close, obv):
         return True, "alta"
     return False, None
 
+def calcular_bollinger_bands(close, window=20, num_std=2):
+    series = pd.Series(close)
+    mean = series.rolling(window).mean()
+    std = series.rolling(window).std()
+    upper = mean + (std * num_std)
+    lower = mean - (std * num_std)
+    return {"upper": upper.values, "lower": lower.values}
+
 def detectar_squeeze_overextension(close):
     bandas = calcular_bollinger_bands(close)
     spread = bandas["upper"][-1] - bandas["lower"][-1]
@@ -130,14 +139,6 @@ def detectar_squeeze_overextension(close):
         else:
             direcao = "indefinida"
     return spread, release, direcao
-
-def calcular_bollinger_bands(close, window=20, num_std=2):
-    series = pd.Series(close)
-    mean = series.rolling(window).mean()
-    std = series.rolling(window).std()
-    upper = mean + (std * num_std)
-    lower = mean - (std * num_std)
-    return {"upper": upper.values, "lower": lower.values}
 
 def consultar_indice_fear_greed():
     try:
@@ -159,3 +160,49 @@ def consultar_indice_fear_greed():
     except Exception as e:
         print(f"[FearGreed] Erro ao consultar índice: {e}")
         return None, None
+
+def analisar_ativos(ativo, precos, high, low, open_, close, volume):
+    resultados = {}
+
+    # RSI e Stoch RSI
+    rsi = calcular_rsi(precos)
+    stoch_rsi, k, d = calcular_stoch_rsi(precos)
+    resultados['rsi'] = rsi[-1]
+    resultados['stoch_rsi'] = {"stoch_rsi": stoch_rsi, "%K": k, "%D": d}
+
+    # MFI
+    mfi = calcular_mfi(high, low, close, volume)
+    resultados['mfi'] = mfi[-1] if mfi[-1] else None
+
+    # MACD
+    macd, signal, hist = calcular_macd(close)
+    resultados['macd'] = {"macd": macd[-1], "signal": signal[-1], "hist": hist[-1]}
+
+    # OBV
+    obv = calcular_obv(close, volume)
+    resultados['obv'] = obv[-1]
+
+    # Candlestick Patterns
+    resultados['padrões'] = {
+        "martelo": detectar_martelo(open_, high, low, close),
+        "martelo_invertido": detectar_martelo_invertido(open_, high, low, close),
+        "engolfo": detectar_engolfo(open_, high, low, close),
+        "estrela_manha": detectar_estrela_manha(open_, high, low, close),
+        "estrela_noite": detectar_estrela_noite(open_, high, low, close),
+        "três_soldados_brancos": detectar_tres_soldados_brancos(open_, high, low, close),
+        "três_corvos_negros": detectar_tres_corvos_negros(open_, high, low, close),
+    }
+
+    # Divergências
+    div_rsi, tipo_rsi = detectar_divergencia_rsi(close, rsi)
+    div_obv, tipo_obv = detectar_divergencia_obv(close, obv)
+    resultados['divergencias'] = {
+        "rsi": {"existe": div_rsi, "tipo": tipo_rsi},
+        "obv": {"existe": div_obv, "tipo": tipo_obv}
+    }
+
+    # Squeeze & Overextension
+    spread, release, direcao = detectar_squeeze_overextension(close)
+    resultados['squeeze'] = {"spread": spread, "liberação": release, "direção": direcao}
+
+    return resultados
