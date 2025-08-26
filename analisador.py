@@ -132,9 +132,15 @@ def _send_text(webhook_url, texto):
     for i, chunk in enumerate(parts, 1):
         try:
             suffix = f" (parte {i}/{len(parts)})" if len(parts) > 1 else ""
-            requests.post(webhook_url, json={"text": chunk + suffix}, timeout=8)
+            payload = {
+                "text": chunk + suffix,
+                "message": chunk + suffix,   # redundância
+                "content": chunk + suffix    # redundância
+            }
+            requests.post(webhook_url, json=payload, timeout=8)
         except Exception as e:
             print(f"[WEBHOOK] Erro ao enviar: {e}")
+
 
 # ========= análise principal
 def analisar_ativos(ativo, par, intervalo, webhook_url):
