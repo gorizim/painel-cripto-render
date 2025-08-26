@@ -1,8 +1,10 @@
 # analisador.py — travas: 1x por candle + near-edge-only | horário BRT (UTC-3)
-import requests
+import os, time, requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
+from dotenv import load_dotenv
+
 from indicadores_tecnicos import (
     calcular_rsi, calcular_stoch_rsi, calcular_mfi,
     calcular_macd, calcular_obv, calcular_bollinger_bands,
@@ -11,13 +13,13 @@ from indicadores_tecnicos import (
     detectar_tres_soldados_brancos, detectar_tres_corvos_negros,
     detectar_divergencia_rsi, detectar_divergencia_obv,
     detectar_squeeze_overextension,
-    # === novos extras ===
+    # extras
     calcular_atr, calcular_percent_b, calcular_bollinger_width,
     calcular_spread_vs_ma, calcular_volatilidade_pct
 )
 from utils import consultar_eventos_cripto, consultar_indice_fear_greed
-import os, time
-from dotenv import load_dotenv
+
+# Garante .env carregado neste fluxo também
 load_dotenv()
 
 # ========= utilidades de tempo (BRT)
@@ -40,7 +42,14 @@ def _cooldown_ok(ativo, tipo, minutes):
         return True
     return False
 
-# ========= targets e config (via ENV)
+# ========= flags e config (via ENV)
+def _env_flag(name, default="0"):
+    val = os.getenv(name, default)
+    return str(val).strip().lower() in ("1", "true", "yes", "y")
+
+def _snapshot_on(ativo):
+    return _env_flag(f"SNAPSHOT_{str(ativo).upper()}", "0")
+
 def _get_targets(ativo):
     up = ativo.upper()
     buy = os.getenv(f"TARGET_BUY_{up}")
@@ -53,26 +62,15 @@ def _get_targets(ativo):
     return _parse(buy), _parse(sell)
 
 def _get_cfg():
-    near_pct        = float(os.getenv("TARGET_NEAR_PCT", "3.0"))      # você quer 3.0
-    cooldown_min    = int(os.getenv("TARGET_COOLDOWN_MIN", "60"))     # você quer 60
-    send_only       = os.getenv("SEND_ONLY_TARGETS", "1") == "1"      # você usa 1
-    only_on_new_bar = os.getenv("ONLY_ON_NEW_BAR", "1") == "1"        # NOVO: 1x por candle
-    near_edge_only  = os.getenv("NEAR_EDGE_ONLY", "1") == "1"         # NOVO: 🎯 só na ENTRADA
+    near_pct        = float(os.getenv("TARGET_NEAR_PCT", "3.0"))
+    cooldown_min    = int(os.getenv("TARGET_COOLDOWN_MIN", "60"))
+    send_only       = os.getenv("SEND_ONLY_TARGETS", "1") == "1"
+    only_on_new_bar = os.getenv("ONLY_ON_NEW_BAR", "1") == "1"
+    near_edge_only  = os.getenv("NEAR_EDGE_ONLY", "1") == "1"
     return near_pct, cooldown_min, send_only, only_on_new_bar, near_edge_only
 
-# ========= flags de SNAPSHOT
-def _env_flag(name, default="0"):
-    val = os.getenv(name, default)
-    return str(val).strip().lower() in ("1","true","yes","y")
-
-def _snapshot_on(ativo):
-    up = str(ativo).upper()
-    return _env_flag(f"SNAPSHOT_{up}", "0")
-
-# ========= fetch Binance com fallback (mesma lógica)
+# ========= fetch Binance com fallback
 def _try_fetch_klines(ativo, par, intervalo, base_url):
-    url = f"{base_url.rstrip('/')}/api/v3/klines?symbol={par.upper()}&interval={intervalo}&limit=100}"
-    # corrigir '}' extra? manter compat c/ versão anterior:
     url = f"{base_url.rstrip('/')}/api/v3/klines?symbol={par.upper()}&interval={intervalo}&limit=100"
     try:
         r = requests.get(url, timeout=10)
@@ -107,8 +105,8 @@ def _is_reentrada_bollinger(close, hband, lband):
     c0, c1 = close[-2], close[-1]
     hb0, hb1 = hband[-2], hband[-1]
     lb0, lb1 = lband[-2], lband[-1]
-    reentrou_acima  = (c0 > hb0 and c1 <= hb1)   # voltou p/ dentro vindo de cima
-    reentrou_abaixo = (c0 < lb0 and c1 >= lb1)   # voltou p/ dentro vindo de baixo
+    reentrou_acima  = (c0 > hb0 and c1 <= hb1)
+    reentrou_abaixo = (c0 < lb0 and c1 >= lb1)
     return reentrou_acima, reentrou_abaixo
 
 def _suporte_resistencia_recent(highs, lows, close):
@@ -156,8 +154,6 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
     near_pct, cooldown_min, send_only_targets, only_on_new_bar, near_edge_only = _get_cfg()
     alvo_buy, alvo_sell = _get_targets(ativo)
 
-    sinais = []
-
     # ===== Indicadores base
     rsi = calcular_rsi(close_prices)
     macd_line, macd_signal, macd_hist = calcular_macd(close_prices)
@@ -165,12 +161,12 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
     mavg, hband, lband = calcular_bollinger_bands(close_prices)
     stoch = calcular_stoch_rsi(close_prices)
 
-    # === Indicadores extras (novos)
+    # ===== Extras
     atr14 = calcular_atr(high_prices, low_prices, close_prices, window=14)
-    bb_width = calcular_bollinger_width(lband, hband)          # largura absoluta
-    percent_b = calcular_percent_b(close_prices, lband, hband) # %B
-    spread_vs_ma = calcular_spread_vs_ma(close_prices, mavg)   # (% acima/abaixo da MA) em %
-    vol_pct = calcular_volatilidade_pct(close_prices, window=20)  # vol % (janela 20)
+    bb_width = calcular_bollinger_width(lband, hband)
+    percent_b = calcular_percent_b(close_prices, lband, hband)
+    spread_vs_ma = calcular_spread_vs_ma(close_prices, mavg)
+    vol_pct = calcular_volatilidade_pct(close_prices, window=20)
 
     # Divergências
     div_rsi, tipo_div_rsi = detectar_divergencia_rsi(close_prices, rsi)
@@ -184,17 +180,15 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
     pad_estrela_noi = detectar_estrela_noite(open_prices, high_prices, low_prices, close_prices)
     pad_3sold       = detectar_tres_soldados_brancos(open_prices, high_prices, low_prices, close_prices)
     pad_3corvos     = detectar_tres_corvos_negros(open_prices, high_prices, low_prices, close_prices)
-    padroes_txt = ",".join([
-        n for n, ok in [
-            ("martelo", pad_martelo),
-            ("martelo_invertido", pad_mart_inv),
-            ("engolfo", pad_engolfo),
-            ("estrela_manha", pad_estrela_man),
-            ("estrela_noite", pad_estrela_noi),
-            ("tres_soldados", pad_3sold),
-            ("tres_corvos", pad_3corvos),
-        ] if ok
-    ]) or "nenhum"
+    padroes_txt = ",".join([n for n, ok in [
+        ("martelo", pad_martelo),
+        ("martelo_invertido", pad_mart_inv),
+        ("engolfo", pad_engolfo),
+        ("estrela_manha", pad_estrela_man),
+        ("estrela_noite", pad_estrela_noi),
+        ("tres_soldados", pad_3sold),
+        ("tres_corvos", pad_3corvos),
+    ] if ok]) or "nenhum"
 
     # S&O
     _, liberado, direcao = detectar_squeeze_overextension(close_prices)
@@ -218,7 +212,7 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
         key_bar = f"{ativo}:{intervalo}"
         last = _LAST_BAR_CLOSE_TS.get(key_bar)
         if last is not None and close_ms == last:
-            allow_send = False  # já avisou neste candle; suprimir
+            allow_send = False
         else:
             _LAST_BAR_CLOSE_TS[key_bar] = close_ms
 
@@ -263,9 +257,9 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
     def _edge(now_near, prev_near):
         return (now_near and not prev_near) if near_edge_only else now_near
 
-    sinais = []  # (redeclara propositalmente para clareza)
+    sinais = []
 
-    # COMPRA (alvo de buy)
+    # COMPRA
     if _edge(near_buy, prev_near_buy):
         if criterios_fundo >= 3 and _cooldown_ok(ativo, "buy_confluence", cooldown_min):
             sinais.append(f"✅ FUNDO REAL (confluência ≥3) perto do alvo de COMPRA {alvo_buy:.2f} USDT")
@@ -273,7 +267,7 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
         elif _cooldown_ok(ativo, "buy_near", cooldown_min):
             sinais.append(f"🎯 Próximo ao alvo de COMPRA {alvo_buy:.2f} USDT — aguardando confluência (atual {preco_atual:.2f})")
 
-    # VENDA (alvo de sell)
+    # VENDA
     if _edge(near_sell, prev_near_sell):
         if criterios_topo >= 3 and _cooldown_ok(ativo, "sell_confluence", cooldown_min):
             sinais.append(f"✅ TOPO REAL (confluência ≥3) perto do alvo de VENDA {alvo_sell:.2f} USDT")
@@ -281,11 +275,10 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
         elif _cooldown_ok(ativo, "sell_near", cooldown_min):
             sinais.append(f"🎯 Próximo ao alvo de VENDA {alvo_sell:.2f} USDT — aguardando confluência (atual {preco_atual:.2f})")
 
-    # Atualiza estados “near” (sempre)
     _NEAR_STATE[st_key_buy]  = bool(near_buy)
     _NEAR_STATE[st_key_sell] = bool(near_sell)
 
-    # ===== Complementos opcionais (economia ON por padrão)
+    # ===== Complementos opcionais (FG/Eventos controlados por ENV)
     fg_valor = consultar_indice_fear_greed() if os.getenv("INCLUDE_FG", "0") == "1" else None
     eventos_textos = []
     if os.getenv("INCLUDE_EVENTS", "0") == "1":
@@ -301,7 +294,7 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
         except Exception:
             pass
 
-    # ===== BLOCO para GPT (mesmo formato) — agora com os novos campos
+    # ===== BLOCO para GPT (com extras)
     gpt_block = (
         "[CRYPTO_ANALYTICS]\n"
         f"ativo={ativo}\npar={par.upper()}\nintervalo={intervalo}\n"
@@ -319,13 +312,11 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
         f"bollinger_sup={hband[-1]:.2f}\n"
         f"bollinger_inf={lband[-1]:.2f}\n"
         f"bollinger_reentrada={'acima' if reentrou_acima else ('abaixo' if reentrou_abaixo else 'nao')}\n"
-        # ====== NOVOS CAMPOS ======
         f"atr14={atr14[-1]:.2f}\n"
         f"bb_percent_b={percent_b[-1]:.3f}\n"
         f"bb_width={bb_width[-1]:.2f}\n"
         f"spread_vs_ma_pct={spread_vs_ma[-1]:.2f}\n"
         f"volatilidade_pct20={vol_pct[-1]:.2f}\n"
-        # ===========================
         f"suporte={suporte:.2f}\nresistencia={resistencia:.2f}\n"
         f"dist_suporte_pct={dist_sup*100:.2f}\n"
         f"dist_resistencia_pct={dist_res*100:.2f}\n"
@@ -343,14 +334,12 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
         "[/CRYPTO_ANALYTICS]"
     )
 
-    # ===== SNAPSHOT manual (força envio com todos os indicadores)
+    # ===== SNAPSHOT manual (fora das travas; envia sempre que ligado)
     if _snapshot_on(ativo):
         cab = f"[{ativo}] 📸 SNAPSHOT — {_now_brt()} - Intervalo {intervalo} | Preço: {preco_atual:.2f} USDT"
-        texto = cab + "\n\n" + gpt_block
-        _send_text(webhook_url, texto)
-        # não retornamos: deixamos o fluxo normal rodar também
+        _send_text(webhook_url, cab + "\n\n" + gpt_block)
 
-    # ===== Política de envio (com travas)
+    # ===== Política de envio normal
     if send_only_targets and not any(s.startswith(("✅", "🎯")) for s in sinais):
         print(f"[{ativo}] Sem alvo próximo/confirmado — não enviar (SEND_ONLY_TARGETS=1).")
         return
@@ -361,7 +350,6 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
 
     if sinais:
         cab = f"[{ativo}] ⏰ {_now_brt()} - Intervalo {intervalo} | Preço: {preco_atual:.2f} USDT"
-        texto = cab + "\n\n" + "\n".join(sinais) + "\n\n" + gpt_block
-        _send_text(webhook_url, texto)
+        _send_text(webhook_url, cab + "\n\n" + "\n".join(sinais) + "\n\n" + gpt_block)
     else:
         print(f"[{ativo}] Nenhum sinal relevante no momento.")
