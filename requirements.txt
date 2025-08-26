@@ -1,6 +1,8 @@
 python-dotenv
 requests
-ta
+ta==0.10.2
 ccxt
 pandas
 numpy
+pytz
+cryptography
