@@ -1,208 +1,173 @@
-import os
-import requests
 import numpy as np
 import pandas as pd
-from dotenv import load_dotenv
+from ta.momentum import RSIIndicator
+from ta.trend import MACD
+from ta.volume import OnBalanceVolumeIndicator
+from ta.volatility import BollingerBands
 
-load_dotenv()
+# === Indicadores Técnicos (básicos) ===
 
-def calcular_rsi(precos, period=14):
-    deltas = np.diff(precos)
-    seed = deltas[:period]
-    up = seed[seed >= 0].sum() / period
-    down = -seed[seed < 0].sum() / period
-    rs = up / down if down != 0 else 0
-    rsi = np.zeros_like(precos)
-    rsi[:period] = 100. - 100. / (1. + rs)
+def calcular_rsi(close, window=14):
+    return RSIIndicator(pd.Series(close), window=window).rsi().tolist()
 
-    for i in range(period, len(precos)):
-        delta = deltas[i - 1]
-        if delta > 0:
-            upval = delta
-            downval = 0.
-        else:
-            upval = 0.
-            downval = -delta
+def calcular_stoch_rsi(close, window=14):
+    rsi = pd.Series(calcular_rsi(close, window))
+    stoch_rsi = (rsi - rsi.rolling(window).min()) / (rsi.rolling(window).max() - rsi.rolling(window).min())
+    return stoch_rsi.fillna(0).tolist()
 
-        up = (up * (period - 1) + upval) / period
-        down = (down * (period - 1) + downval) / period
+def calcular_mfi(high, low, close, volume, window=14):
+    tp = (np.array(high) + np.array(low) + np.array(close)) / 3
+    raw_money_flow = tp * np.array(volume)
+    direction = np.sign(np.diff(tp, prepend=tp[0]))
+    pos_flow = np.where(direction > 0, raw_money_flow, 0)
+    neg_flow = np.where(direction < 0, raw_money_flow, 0)
+    pos_sum = pd.Series(pos_flow).rolling(window).sum()
+    neg_sum = pd.Series(neg_flow).rolling(window).sum()
+    mfi = 100 - (100 / (1 + (pos_sum / neg_sum)))
+    return mfi.fillna(50).tolist()
 
-        rs = up / down if down != 0 else 0
-        rsi[i] = 100. - 100. / (1. + rs)
-
-    return rsi
-
-def calcular_stoch_rsi(precos, period=14):
-    rsi = calcular_rsi(precos, period)
-    stoch_rsi = (rsi - np.min(rsi[-period:])) / (np.max(rsi[-period:]) - np.min(rsi[-period:])) * 100
-    k = np.mean(stoch_rsi[-3:])
-    d = np.mean(stoch_rsi[-6:])
-    return stoch_rsi[-1], k, d
-
-def calcular_mfi(high, low, close, volume, period=14):
-    typical_price = (np.array(high) + np.array(low) + np.array(close)) / 3
-    money_flow = typical_price * volume
-    positive_flow = []
-    negative_flow = []
-
-    for i in range(1, len(typical_price)):
-        if typical_price[i] > typical_price[i - 1]:
-            positive_flow.append(money_flow[i])
-            negative_flow.append(0)
-        else:
-            positive_flow.append(0)
-            negative_flow.append(money_flow[i])
-
-    pos_mf = np.sum(positive_flow[-period:])
-    neg_mf = np.sum(negative_flow[-period:])
-    if neg_mf == 0:
-        return [100] * len(close)
-    mfi = 100 - (100 / (1 + (pos_mf / neg_mf)))
-    return [None] * (len(close) - 1) + [mfi]
-
-def calcular_macd(precos, slow=26, fast=12, signal=9):
-    exp1 = np.array(pd.Series(precos).ewm(span=fast, adjust=False).mean())
-    exp2 = np.array(pd.Series(precos).ewm(span=slow, adjust=False).mean())
-    macd = exp1 - exp2
-    signal_line = pd.Series(macd).ewm(span=signal, adjust=False).mean()
-    histogram = macd - signal_line
-    return macd, signal_line, histogram
+def calcular_macd(close):
+    macd = MACD(pd.Series(close))
+    return macd.macd().tolist(), macd.macd_signal().tolist(), macd.macd_diff().tolist()
 
 def calcular_obv(close, volume):
-    obv = [0]
-    for i in range(1, len(close)):
-        if close[i] > close[i - 1]:
-            obv.append(obv[-1] + volume[i])
-        elif close[i] < close[i - 1]:
-            obv.append(obv[-1] - volume[i])
-        else:
-            obv.append(obv[-1])
-    return obv
+    obv = OnBalanceVolumeIndicator(pd.Series(close), pd.Series(volume))
+    return obv.on_balance_volume().tolist()
+
+def calcular_bollinger_bands(close, window=20, std=2):
+    bb = BollingerBands(pd.Series(close), window=window, window_dev=std)
+    return bb.bollinger_mavg().tolist(), bb.bollinger_hband().tolist(), bb.bollinger_lband().tolist()
+
+# === Candlestick Patterns ===
 
 def detectar_martelo(open_, high, low, close):
-    return close[-1] > open_[-1] and (high[-1] - low[-1]) > 3 * (open_[-1] - close[-1])
+    for o, h, l, c in zip(open_, high, low, close):
+        corpo = abs(c - o)
+        sombra_inferior = o - l if c > o else c - l
+        sombra_superior = h - c if c > o else h - o
+        if corpo < sombra_inferior and sombra_superior < corpo:
+            return True
+    return False
 
 def detectar_martelo_invertido(open_, high, low, close):
-    return close[-1] > open_[-1] and (high[-1] - open_[-1]) > 2 * (open_[-1] - low[-1])
+    for o, h, l, c in zip(open_, high, low, close):
+        corpo = abs(c - o)
+        sombra_superior = h - c if c > o else h - o
+        sombra_inferior = o - l if c > o else c - l
+        if corpo < sombra_superior and sombra_inferior < corpo:
+            return True
+    return False
 
 def detectar_engolfo(open_, high, low, close):
-    return close[-1] > open_[-1] and close[-2] < open_[-2] and close[-1] > open_[-2] and open_[-1] < close[-2]
+    for i in range(1, len(close)):
+        if close[i] > open_[i] and close[i-1] < open_[i-1]:
+            if open_[i] < close[i-1] and close[i] > open_[i-1]:
+                return True
+    return False
 
 def detectar_estrela_manha(open_, high, low, close):
-    return close[-3] < open_[-3] and abs(close[-2] - open_[-2]) < 0.1 * (high[-2] - low[-2]) and close[-1] > open_[-1] and close[-1] > (close[-3] + open_[-3]) / 2
+    for i in range(2, len(close)):
+        if close[i-2] < open_[i-2] and abs(close[i-1] - open_[i-1]) < 0.1 and close[i] > open_[i] and close[i] > close[i-2]:
+            return True
+    return False
 
 def detectar_estrela_noite(open_, high, low, close):
-    return close[-3] > open_[-3] and abs(close[-2] - open_[-2]) < 0.1 * (high[-2] - low[-2]) and close[-1] < open_[-1] and close[-1] < (close[-3] + open_[-3]) / 2
+    for i in range(2, len(close)):
+        if close[i-2] > open_[i-2] and abs(close[i-1] - open_[i-1]) < 0.1 and close[i] < open_[i] and close[i] < close[i-2]:
+            return True
+    return False
 
 def detectar_tres_soldados_brancos(open_, high, low, close):
-    return close[-1] > open_[-1] and close[-2] > open_[-2] and close[-3] > open_[-3]
+    for i in range(2, len(close)):
+        if close[i] > open_[i] and close[i-1] > open_[i-1] and close[i-2] > open_[i-2]:
+            return True
+    return False
 
 def detectar_tres_corvos_negros(open_, high, low, close):
-    return close[-1] < open_[-1] and close[-2] < open_[-2] and close[-3] < open_[-3]
+    for i in range(2, len(close)):
+        if close[i] < open_[i] and close[i-1] < open_[i-1] and close[i-2] < open_[i-2]:
+            return True
+    return False
+
+# === Divergências ===
 
 def detectar_divergencia_rsi(close, rsi):
-    if len(close) < 3 or len(rsi) < 3:
+    if len(close) < 5 or len(rsi) < 5:
         return False, None
-    if close[-1] > close[-2] and rsi[-1] < rsi[-2]:
+    if close[-1] > close[-3] and rsi[-1] < rsi[-3]:
         return True, "baixa"
-    if close[-1] < close[-2] and rsi[-1] > rsi[-2]:
+    elif close[-1] < close[-3] and rsi[-1] > rsi[-3]:
         return True, "alta"
     return False, None
 
 def detectar_divergencia_obv(close, obv):
-    if len(close) < 3 or len(obv) < 3:
+    if len(close) < 5 or len(obv) < 5:
         return False, None
-    if close[-1] > close[-2] and obv[-1] < obv[-2]:
+    if close[-1] > close[-3] and obv[-1] < obv[-3]:
         return True, "baixa"
-    if close[-1] < close[-2] and obv[-1] > obv[-2]:
+    elif close[-1] < close[-3] and obv[-1] > obv[-3]:
         return True, "alta"
     return False, None
 
-def calcular_bollinger_bands(close, window=20, num_std=2):
-    series = pd.Series(close)
-    mean = series.rolling(window).mean()
-    std = series.rolling(window).std()
-    upper = mean + (std * num_std)
-    lower = mean - (std * num_std)
-    return {"upper": upper.values, "lower": lower.values}
+# === Squeeze & Overextension (S&O) ===
 
-def detectar_squeeze_overextension(close):
-    bandas = calcular_bollinger_bands(close)
-    spread = bandas["upper"][-1] - bandas["lower"][-1]
-    release = spread > (np.mean(bandas["upper"][-20:] - bandas["lower"][-20:]) * 1.5)
+def detectar_squeeze_overextension(close, window=20):
+    prices = pd.Series(close)
+    rolling_mean = prices.rolling(window=window).mean()
+    rolling_std = prices.rolling(window=window).std()
+    upper_band = rolling_mean + 2 * rolling_std
+    lower_band = rolling_mean - 2 * rolling_std
+    spread = upper_band - lower_band
+
+    spread_now = spread.iloc[-1]
+    spread_anterior = spread.iloc[-5:-1].mean()
+
+    liberado = spread_now > spread_anterior * 1.2  # explosão confirmada
     direcao = None
-    if release:
-        if close[-1] > close[-2] > close[-3]:
+
+    if liberado:
+        if close[-1] > rolling_mean.iloc[-1]:
             direcao = "alta"
-        elif close[-1] < close[-2] < close[-3]:
+        elif close[-1] < rolling_mean.iloc[-1]:
             direcao = "baixa"
-        else:
-            direcao = "indefinida"
-    return spread, release, direcao
 
-def consultar_indice_fear_greed():
-    try:
-        api_key = os.getenv("FEAR_GREED_API_KEY")
-        headers = {
-            "Accepts": "application/json",
-            "x-api-key": api_key
-        }
-        url = "https://api.alternative.me/fng/?limit=1"
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            valor = int(data["data"][0]["value"])
-            classificacao = data["data"][0]["value_classification"]
-            return valor, classificacao
-        else:
-            print(f"[FearGreed] Erro {response.status_code}")
-            return None, None
-    except Exception as e:
-        print(f"[FearGreed] Erro ao consultar índice: {e}")
-        return None, None
+    return spread_now, liberado, direcao
 
-def analisar_ativos(ativo, precos, high, low, open_, close, volume):
-    resultados = {}
+# === Indicadores extras (ATR, %B, largura BB, spread vs MA, volatilidade %) ===
 
-    # RSI e Stoch RSI
-    rsi = calcular_rsi(precos)
-    stoch_rsi, k, d = calcular_stoch_rsi(precos)
-    resultados['rsi'] = rsi[-1]
-    resultados['stoch_rsi'] = {"stoch_rsi": stoch_rsi, "%K": k, "%D": d}
+def calcular_atr(high, low, close, window=14):
+    h = pd.Series(high, dtype=float)
+    l = pd.Series(low, dtype=float)
+    c = pd.Series(close, dtype=float)
+    prev_close = c.shift(1)
+    tr = pd.concat([
+        (h - l).abs(),
+        (h - prev_close).abs(),
+        (l - prev_close).abs()
+    ], axis=1).max(axis=1)
+    atr = tr.rolling(window=window).mean()
+    return atr.fillna(method="bfill").tolist()
 
-    # MFI
-    mfi = calcular_mfi(high, low, close, volume)
-    resultados['mfi'] = mfi[-1] if mfi[-1] else None
+def calcular_percent_b(close, bb_lower, bb_upper):
+    c = pd.Series(close, dtype=float)
+    lower = pd.Series(bb_lower, dtype=float)
+    upper = pd.Series(bb_upper, dtype=float)
+    width = (upper - lower).replace(0, 1e-9)
+    percent_b = (c - lower) / width
+    return percent_b.clip(lower=-1e9, upper=1e9).tolist()
 
-    # MACD
-    macd, signal, hist = calcular_macd(close)
-    resultados['macd'] = {"macd": macd[-1], "signal": signal[-1], "hist": hist[-1]}
+def calcular_bollinger_width(bb_lower, bb_upper):
+    lower = pd.Series(bb_lower, dtype=float)
+    upper = pd.Series(bb_upper, dtype=float)
+    return (upper - lower).tolist()
 
-    # OBV
-    obv = calcular_obv(close, volume)
-    resultados['obv'] = obv[-1]
+def calcular_spread_vs_ma(close, ma):
+    c = pd.Series(close, dtype=float)
+    m = pd.Series(ma, dtype=float).replace(0, 1e-9)
+    return ((c - m) / m * 100.0).tolist()
 
-    # Candlestick Patterns
-    resultados['padrões'] = {
-        "martelo": detectar_martelo(open_, high, low, close),
-        "martelo_invertido": detectar_martelo_invertido(open_, high, low, close),
-        "engolfo": detectar_engolfo(open_, high, low, close),
-        "estrela_manha": detectar_estrela_manha(open_, high, low, close),
-        "estrela_noite": detectar_estrela_noite(open_, high, low, close),
-        "três_soldados_brancos": detectar_tres_soldados_brancos(open_, high, low, close),
-        "três_corvos_negros": detectar_tres_corvos_negros(open_, high, low, close),
-    }
-
-    # Divergências
-    div_rsi, tipo_rsi = detectar_divergencia_rsi(close, rsi)
-    div_obv, tipo_obv = detectar_divergencia_obv(close, obv)
-    resultados['divergencias'] = {
-        "rsi": {"existe": div_rsi, "tipo": tipo_rsi},
-        "obv": {"existe": div_obv, "tipo": tipo_obv}
-    }
-
-    # Squeeze & Overextension
-    spread, release, direcao = detectar_squeeze_overextension(close)
-    resultados['squeeze'] = {"spread": spread, "liberação": release, "direção": direcao}
-
-    return resultados
+def calcular_volatilidade_pct(close, window=20):
+    c = pd.Series(close, dtype=float)
+    ret = c.pct_change()
+    vol = ret.rolling(window).std() * (window ** 0.5) * 100.0  # anualização simples do período
+    return vol.fillna(method="bfill").tolist()
