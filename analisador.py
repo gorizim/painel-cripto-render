@@ -189,4 +189,179 @@ def analisar_ativos(ativo, par, intervalo, webhook_url):
             ("martelo", pad_martelo),
             ("martelo_invertido", pad_mart_inv),
             ("engolfo", pad_engolfo),
-            ("estrela_manha", p_
+            ("estrela_manha", pad_estrela_man),
+            ("estrela_noite", pad_estrela_noi),
+            ("tres_soldados", pad_3sold),
+            ("tres_corvos", pad_3corvos),
+        ] if ok
+    ]) or "nenhum"
+
+    # S&O
+    _, liberado, direcao = detectar_squeeze_overextension(close_prices)
+
+    # S/R e reentrada
+    suporte, resistencia, dist_sup, dist_res = _suporte_resistencia_recent(high_prices, low_prices, close_prices)
+    reentrou_acima, reentrou_abaixo = _is_reentrada_bollinger(close_prices, hband, lband)
+
+    # Tendências curtas
+    macd_hist_sobe = (_slope(macd_hist, 3) > 0)
+    macd_hist_cai  = (_slope(macd_hist, 3) < 0)
+    stoch_sobe     = (_slope(stoch, 3) > 0)
+    stoch_cai      = (_slope(stoch, 3) < 0)
+
+    def _near(x, alvo, pct):
+        return (alvo is not None) and (abs(x - alvo) / max(alvo, 1e-9) <= (pct / 100.0))
+
+    # ===== Travamento “1x por candle”
+    allow_send = True
+    if only_on_new_bar:
+        key_bar = f"{ativo}:{intervalo}"
+        last = _LAST_BAR_CLOSE_TS.get(key_bar)
+        if last is not None and close_ms == last:
+            allow_send = False  # já avisou neste candle; suprimir
+        else:
+            _LAST_BAR_CLOSE_TS[key_bar] = close_ms
+
+    # ===== Confluências
+    criterios_fundo = 0; explic_fundo = []
+    if stoch[-1] < 0.2 and stoch_sobe:
+        criterios_fundo += 1; explic_fundo.append("StochRSI < 0.2 e subindo")
+    if (macd_hist[-1] > 0 and macd_hist[-2] < 0) or macd_hist_sobe:
+        criterios_fundo += 1; explic_fundo.append("MACD/hist virando p/ alta")
+    if div_rsi and tipo_div_rsi == "alta":
+        criterios_fundo += 1; explic_fundo.append("Divergência RSI (alta)")
+    if div_obv and tipo_div_obv == "alta":
+        criterios_fundo += 1; explic_fundo.append("Divergência OBV (alta)")
+    if (pad_martelo or pad_estrela_man or pad_engolfo) and dist_sup < 0.01:
+        criterios_fundo += 1; explic_fundo.append("Candle de reversão em suporte ±1%")
+    if reentrou_abaixo:
+        criterios_fundo += 1; explic_fundo.append("Reentrada acima da banda inferior")
+
+    criterios_topo = 0; explic_topo = []
+    if stoch[-1] > 0.8 and stoch_cai:
+        criterios_topo += 1; explic_topo.append("StochRSI > 0.8 e caindo")
+    if (macd_hist[-1] < 0 and macd_hist[-2] > 0) or macd_hist_cai:
+        criterios_topo += 1; explic_topo.append("MACD/hist virando p/ baixa")
+    if div_rsi and tipo_div_rsi == "baixa":
+        criterios_topo += 1; explic_topo.append("Divergência RSI (baixa)")
+    if div_obv and tipo_div_obv == "baixa":
+        criterios_topo += 1; explic_topo.append("Divergência OBV (baixa)")
+    if (pad_estrela_noi or pad_engolfo or pad_3corvos) and dist_res < 0.01:
+        criterios_topo += 1; explic_topo.append("Candle de reversão em resistência ±1%")
+    if reentrou_acima:
+        criterios_topo += 1; explic_topo.append("Reentrada abaixo da banda superior")
+
+    # ===== Gatilhos (com NEAR edge-only opcional)
+    near_buy  = _near(preco_atual, alvo_buy,  near_pct)
+    near_sell = _near(preco_atual, alvo_sell, near_pct)
+
+    st_key_buy  = f"{ativo}:{intervalo}:buy"
+    st_key_sell = f"{ativo}:{intervalo}:sell"
+    prev_near_buy  = _NEAR_STATE.get(st_key_buy, False)
+    prev_near_sell = _NEAR_STATE.get(st_key_sell, False)
+
+    def _edge(now_near, prev_near):
+        return (now_near and not prev_near) if near_edge_only else now_near
+
+    sinais = []  # (redeclara propositalmente para clareza)
+
+    # COMPRA (alvo de buy)
+    if _edge(near_buy, prev_near_buy):
+        if criterios_fundo >= 3 and _cooldown_ok(ativo, "buy_confluence", cooldown_min):
+            sinais.append(f"✅ FUNDO REAL (confluência ≥3) perto do alvo de COMPRA {alvo_buy:.2f} USDT")
+            sinais.append("• " + " | ".join(explic_fundo))
+        elif _cooldown_ok(ativo, "buy_near", cooldown_min):
+            sinais.append(f"🎯 Próximo ao alvo de COMPRA {alvo_buy:.2f} USDT — aguardando confluência (atual {preco_atual:.2f})")
+
+    # VENDA (alvo de sell)
+    if _edge(near_sell, prev_near_sell):
+        if criterios_topo >= 3 and _cooldown_ok(ativo, "sell_confluence", cooldown_min):
+            sinais.append(f"✅ TOPO REAL (confluência ≥3) perto do alvo de VENDA {alvo_sell:.2f} USDT")
+            sinais.append("• " + " | ".join(explic_topo))
+        elif _cooldown_ok(ativo, "sell_near", cooldown_min):
+            sinais.append(f"🎯 Próximo ao alvo de VENDA {alvo_sell:.2f} USDT — aguardando confluência (atual {preco_atual:.2f})")
+
+    # Atualiza estados “near” (sempre)
+    _NEAR_STATE[st_key_buy]  = bool(near_buy)
+    _NEAR_STATE[st_key_sell] = bool(near_sell)
+
+    # ===== Complementos opcionais (economia ON por padrão)
+    fg_valor = consultar_indice_fear_greed() if os.getenv("INCLUDE_FG", "0") == "1" else None
+    eventos_textos = []
+    if os.getenv("INCLUDE_EVENTS", "0") == "1":
+        try:
+            eventos = consultar_eventos_cripto(ativo)
+            if isinstance(eventos, list):
+                for ev in eventos:
+                    if ev.get("impacto") == "alto":
+                        titulo = ev.get("titulo") or ev.get("title") or "Evento"
+                        data_ev = ev.get("data") or ev.get("date_event") or "data não informada"
+                        eventos_textos.append(f"{titulo} ({data_ev})")
+                        sinais.append(f"🏛️ Evento: {titulo} em {data_ev}")
+        except Exception:
+            pass
+
+    # ===== BLOCO para GPT (mesmo formato) — agora com os novos campos
+    gpt_block = (
+        "[CRYPTO_ANALYTICS]\n"
+        f"ativo={ativo}\npar={par.upper()}\nintervalo={intervalo}\n"
+        f"ts_brt={_now_brt()}\n"
+        f"preco_atual_usdt={preco_atual:.2f}\n"
+        f"rsi14={rsi[-1]:.2f}\n"
+        f"stochrsi={stoch[-1]:.3f}\n"
+        f"stochrsi_trend={'up' if stoch_sobe else ('down' if stoch_cai else 'flat')}\n"
+        f"macd_line={macd_line[-1]:.5f}\nmacd_signal={macd_signal[-1]:.5f}\nmacd_hist={macd_hist[-1]:.5f}\n"
+        f"macd_trend={'up' if macd_hist_sobe else ('down' if macd_hist_cai else 'flat')}\n"
+        f"obv_last={obv[-1]:.0f}\n"
+        f"divergencia_rsi={tipo_div_rsi if div_rsi else 'nenhuma'}\n"
+        f"divergencia_obv={tipo_div_obv if div_obv else 'nenhuma'}\n"
+        f"bollinger_ma={mavg[-1]:.2f}\n"
+        f"bollinger_sup={hband[-1]:.2f}\n"
+        f"bollinger_inf={lband[-1]:.2f}\n"
+        f"bollinger_reentrada={'acima' if reentrou_acima else ('abaixo' if reentrou_abaixo else 'nao')}\n"
+        # ====== NOVOS CAMPOS ======
+        f"atr14={atr14[-1]:.2f}\n"
+        f"bb_percent_b={percent_b[-1]:.3f}\n"
+        f"bb_width={bb_width[-1]:.2f}\n"
+        f"spread_vs_ma_pct={spread_vs_ma[-1]:.2f}\n"
+        f"volatilidade_pct20={vol_pct[-1]:.2f}\n"
+        # ===========================
+        f"suporte={suporte:.2f}\nresistencia={resistencia:.2f}\n"
+        f"dist_suporte_pct={dist_sup*100:.2f}\n"
+        f"dist_resistencia_pct={dist_res*100:.2f}\n"
+        f"squeeze_liberado={'true' if liberado else 'false'}\n"
+        f"squeeze_direcao={direcao or 'neutra'}\n"
+        f"volume_last={volume[-1]:.2f}\n"
+        f"volume_media20={(np.mean(volume[-21:-1]) if len(volume)>=21 else np.mean(volume)):.2f}\n"
+        f"fg={fg_valor if fg_valor is not None else 'NA'}\n"
+        f"target_buy={alvo_buy if alvo_buy is not None else 'NA'}\n"
+        f"target_sell={alvo_sell if alvo_sell is not None else 'NA'}\n"
+        f"near_pct={near_pct}\n"
+        f"criterios_fundo={criterios_fundo}\ncriterios_topo={criterios_topo}\n"
+        f"candles_detectados={padroes_txt}\n"
+        f"eventos_alto_impacto={' ; '.join(eventos_textos) if eventos_textos else 'nenhum'}\n"
+        "[/CRYPTO_ANALYTICS]"
+    )
+
+    # ===== SNAPSHOT manual (força envio com todos os indicadores)
+    if _snapshot_on(ativo):
+        cab = f"[{ativo}] 📸 SNAPSHOT — {_now_brt()} - Intervalo {intervalo} | Preço: {preco_atual:.2f} USDT"
+        texto = cab + "\n\n" + gpt_block
+        _send_text(webhook_url, texto)
+        # não retornamos: deixamos o fluxo normal rodar também
+
+    # ===== Política de envio (com travas)
+    if send_only_targets and not any(s.startswith(("✅", "🎯")) for s in sinais):
+        print(f"[{ativo}] Sem alvo próximo/confirmado — não enviar (SEND_ONLY_TARGETS=1).")
+        return
+
+    if not allow_send:
+        print(f"[{ativo}] Candle em formação — alertas suprimidos neste candle (ONLY_ON_NEW_BAR=1).")
+        return
+
+    if sinais:
+        cab = f"[{ativo}] ⏰ {_now_brt()} - Intervalo {intervalo} | Preço: {preco_atual:.2f} USDT"
+        texto = cab + "\n\n" + "\n".join(sinais) + "\n\n" + gpt_block
+        _send_text(webhook_url, texto)
+    else:
+        print(f"[{ativo}] Nenhum sinal relevante no momento.")
