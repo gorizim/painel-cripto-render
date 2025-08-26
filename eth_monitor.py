@@ -1,4 +1,3 @@
-# eth_monitor.py
 from analisador import analisar_ativos
 import time
 from datetime import datetime
@@ -18,7 +17,6 @@ def executar_monitoramento():
             analisar_ativos(ativo=ATIVO, par=PAR, intervalo=INTERVALO, webhook_url=WEBHOOK_URL)
         except Exception as e:
             print(f"[{ATIVO}] Erro: {str(e)}")
-
         time.sleep(1800)
 
 if __name__ == "__main__":
