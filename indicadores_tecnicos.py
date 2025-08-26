@@ -38,42 +38,44 @@ def calcular_bollinger_bands(close, window=20, std=2):
     bb = BollingerBands(pd.Series(close), window=window, window_dev=std)
     return bb.bollinger_mavg().tolist(), bb.bollinger_hband().tolist(), bb.bollinger_lband().tolist()
 
-# === Candlestick Patterns ===
+# === Candlestick Patterns (versões simples/robustas) ===
 
 def detectar_martelo(open_, high, low, close):
     for o, h, l, c in zip(open_, high, low, close):
         corpo = abs(c - o)
-        sombra_inferior = o - l if c > o else c - l
-        sombra_superior = h - c if c > o else h - o
-        if corpo < sombra_inferior and sombra_superior < corpo:
+        sombra_inferior = (o if c > o else c) - l
+        sombra_superior = h - (c if c > o else o)
+        if corpo > 0 and sombra_inferior > corpo and sombra_superior < corpo:
             return True
     return False
 
 def detectar_martelo_invertido(open_, high, low, close):
     for o, h, l, c in zip(open_, high, low, close):
         corpo = abs(c - o)
-        sombra_superior = h - c if c > o else h - o
-        sombra_inferior = o - l if c > o else c - l
-        if corpo < sombra_superior and sombra_inferior < corpo:
+        sombra_superior = h - (c if c > o else o)
+        sombra_inferior = (o if c > o else c) - l
+        if corpo > 0 and sombra_superior > corpo and sombra_inferior < corpo:
             return True
     return False
 
 def detectar_engolfo(open_, high, low, close):
     for i in range(1, len(close)):
-        if close[i] > open_[i] and close[i-1] < open_[i-1]:
-            if open_[i] < close[i-1] and close[i] > open_[i-1]:
-                return True
+        bull_now = close[i] > open_[i]
+        bear_prev = close[i-1] < open_[i-1]
+        bull_engulf_prev = (open_[i] < close[i-1]) and (close[i] > open_[i-1])
+        if bull_now and bear_prev and bull_engulf_prev:
+            return True
     return False
 
 def detectar_estrela_manha(open_, high, low, close):
     for i in range(2, len(close)):
-        if close[i-2] < open_[i-2] and abs(close[i-1] - open_[i-1]) < 0.1 and close[i] > open_[i] and close[i] > close[i-2]:
+        if close[i-2] < open_[i-2] and abs(close[i-1] - open_[i-1]) / max(open_[i-1], 1e-9) < 0.005 and close[i] > open_[i] and close[i] > close[i-2]:
             return True
     return False
 
 def detectar_estrela_noite(open_, high, low, close):
     for i in range(2, len(close)):
-        if close[i-2] > open_[i-2] and abs(close[i-1] - open_[i-1]) < 0.1 and close[i] < open_[i] and close[i] < close[i-2]:
+        if close[i-2] > open_[i-2] and abs(close[i-1] - open_[i-1]) / max(open_[i-1], 1e-9) < 0.005 and close[i] < open_[i] and close[i] < close[i-2]:
             return True
     return False
 
@@ -96,7 +98,7 @@ def detectar_divergencia_rsi(close, rsi):
         return False, None
     if close[-1] > close[-3] and rsi[-1] < rsi[-3]:
         return True, "baixa"
-    elif close[-1] < close[-3] and rsi[-1] > rsi[-3]:
+    if close[-1] < close[-3] and rsi[-1] > rsi[-3]:
         return True, "alta"
     return False, None
 
@@ -105,7 +107,7 @@ def detectar_divergencia_obv(close, obv):
         return False, None
     if close[-1] > close[-3] and obv[-1] < obv[-3]:
         return True, "baixa"
-    elif close[-1] < close[-3] and obv[-1] > obv[-3]:
+    if close[-1] < close[-3] and obv[-1] > obv[-3]:
         return True, "alta"
     return False, None
 
@@ -126,14 +128,11 @@ def detectar_squeeze_overextension(close, window=20):
     direcao = None
 
     if liberado:
-        if close[-1] > rolling_mean.iloc[-1]:
-            direcao = "alta"
-        elif close[-1] < rolling_mean.iloc[-1]:
-            direcao = "baixa"
+        direcao = "alta" if close[-1] > rolling_mean.iloc[-1] else "baixa"
 
     return spread_now, liberado, direcao
 
-# === Indicadores extras (ATR, %B, largura BB, spread vs MA, volatilidade %) ===
+# === Extras: ATR, %B, largura BB, spread vs MA, volatilidade % ===
 
 def calcular_atr(high, low, close, window=14):
     h = pd.Series(high, dtype=float)
@@ -169,5 +168,5 @@ def calcular_spread_vs_ma(close, ma):
 def calcular_volatilidade_pct(close, window=20):
     c = pd.Series(close, dtype=float)
     ret = c.pct_change()
-    vol = ret.rolling(window).std() * (window ** 0.5) * 100.0  # anualização simples do período
+    vol = ret.rolling(window).std() * (window ** 0.5) * 100.0  # anualização simples
     return vol.fillna(method="bfill").tolist()
